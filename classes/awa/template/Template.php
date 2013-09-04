@@ -58,17 +58,11 @@ class Template{
     
 private static $isInit=false;
     
-private $sourceTimeHandler; // 
-private $sourceHandler; // 
-private $compiledFileHandler; // 
-
 private $cacheCompiledFiles=array(); // шаблона=>откомпилированный файл
 private $options=array(); // базовые оцпии шаблонов
 private $compileOptions=array(); // опции компилятора
 
 private $currentOptions; // параметры шаблона для передачи в обработчики
-
-
 
 // Блочные пользовательские функции
 // Вызываются один раз. Из шаблона могут вызвать метод innerContent - лениво вычисляющееся содержимое.
@@ -76,48 +70,40 @@ private $currentOptions; // параметры шаблона для перед�
 
 // Функции компилятора
 // Получают список исходных кодов параметров, возвращают PHP код
-//
 
 
-
-// <editor-fold defaultstate="collapsed" desc="========================= Предварительная конфигурация ======================">
+// <editor-fold defaultstate="collapsed" desc="========================= Кофигурация ======================">
 
 // базовая инициализация, вызывается лениво один раз
 private static function init(){
     define('AWA_TEMPLATE_GUARD', true); // защита от прямого доступа к шаблонам
+}
 
-}
 /**
- * Установка обработчика, определяющего время модификации или создания исходных кодов шаблонов
- * @param Closure $handler параметры те же, что и у setCompiledFileHandler, возвращает время модификации.
- * @return Template this
+ * Определение времеми модификации или создания исходного кода шаблона
+ * @param string $name имя шаблона
+ * @return int время модификации в UNIX-формате
  */
-public function setSourceTimeHandler(Closure $handler){
-    $this->sourceTimeHandler=$handler;
-    return $this;
+protected function getSourceTime($name){
+    return filemtime('templates/'.$name.'.html');
 }
 /**
- * Установка источника исходного кода шаблонов
- * @param Closure $handler параметры те же, что и у setCompiledFileHandler, возвращает исходный код
- * @return Template this
+ * Получение исходного кода шаблона
+ * @param string $name имя шаблона
+ * @return string исходный код
  */
-public function setSourceHandler(Closure $handler){
-    $this->sourceHandler=$handler;
-    return $this;
+protected function getSource($name){
+    
 }
 /**
- * Установка обработчика, определяющего имена скомпилированных файлов
+ * Получение имени скомпилированного файла шаблона. Файл не обязательно должен существовать.
  * Поддерживается только локальное хранение скомпилированных шаблонов.
- * @param Closure $handler получает (Manager $tpl, string $name), возвращает имя скомпилированного файла.
- *  $name имя шаблона, переданное в метод render.
- * Опции можно получить через $tpl->getOptions()
- * @return Template this
+ * Опции можно получить через $this->getOptions()
+ * @param string $name имя шаблона
+ * @return string имя скомпилированного файла
  */
-public function setCompiledFileHandler(Closure $handler){
-    $this->compiledFileHandler=$handler;
+protected function getCompiledFileName($name){
     
-    
-    return $this;
 }
 /**
  * базовые опции шаблонов, которые могут переопределяться для каждого шаблона в отдельности
@@ -141,14 +127,12 @@ public function __construct(){
     }
 }
 /**
- * Опции шаблона, вызывается в обработчиках
+ * Опции последнего шаблона, вызванного методом render.
+ * Используется внутри таких методов, как getSource, getCompiledFileName и другими
  * @return array
  */
-public function getOptions(){
+protected function getOptions(){
     return $this->currentOptions;
-}
-public function getCompiledCode(){
-    return end($this->compiledCode);
 }
 /**
  * Визуализация шаблона.
@@ -162,16 +146,10 @@ public function render($name, array $vars=null, array $options=null){
     if($compFileName===null){
         // добавляем базовые опции, не перезаписывающие индивидуальные
         $this->currentOptions=$options?$options+$this->options:$this->options;
-        // получаем имя скомпилированного файла
-        $compiledFileHandler=$this->compiledFileHandler;
-        $compFileName=$compiledFileHandler($this, $name);
-        $timeHandler=$this->sourceTimeHandler;
-        $sourceTime=$timeHandler($this, $name);
+        $compFileName=$this->getCompiledFileName($name); // получаем имя скомпилированного файла
         // если скомпилированный файл устарел или не существует, перекомпилируем его
-        if(!file_exists($compFileName) || filemtime($compFileName)<$sourceTime){
-            $sourceHandler=$this->sourceHandler;
-            $source=$sourceHandler($this, $name);
-            $code=Compiler::compile($source, $this->compileOptions);
+        if(!file_exists($compFileName) || filemtime($compFileName)<$this->getSourceTime($name)){
+            $code=Compiler::compile($this->getSource($name), $this->compileOptions);
             file_put_contents($compFileName, $code);
         }
     }
@@ -187,43 +165,6 @@ private function exec($___fileName, array $___vars){
     extract($___vars); // превращаем элементы массива в локальные переменные
     return include $___fileName;
 }    
-
-
-//
-//
-///**
-// * Вставка шаблона, вызывается из шаблонов
-// * @param type $module
-// * @param type $name
-// * @param array $vars
-// */
-//private function _include($name, array $vars){
-//    $tpl=new Template($name);
-//    return $tpl->render($vars);
-//}
-///**
-// * Языковая конструкция, вызывается из шаблонов
-// * @param string $module
-// * @param string $pack
-// * @param string $key
-// * @return string 
-// */
-//private function _lang($module, $pack, $key){
-//    if($module===null){
-//        $module=$this->compileDefaults[0];
-//    }
-//    if($pack===null){
-//        $pack=$this->compileDefaults[1];
-//    }
-//    if(!isset(Lang::$lang[$module][$pack][$key])){ 
-//        // если после попытки догрузить всё-равно нет текста, даже в случае успешной загрузки пакета
-//        if(!Lang::load($module, $pack) || !isset(Lang::$lang[$module][$pack][$key])){
-//            Lang::$lang[$module][$pack][$key]='[TPL Lang Error: '.$module.'.'.$pack.'.'.$key.']'; // ложное значение
-//        }
-//    }
-//    return Lang::$lang[$module][$pack][$key];
-//}
-
 
 
 }
