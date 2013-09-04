@@ -59,10 +59,11 @@ class Template{
 private static $isInit=false;
     
 private $cacheCompiledFiles=array(); // шаблона=>откомпилированный файл
-private $options=array(); // базовые оцпии шаблонов
 private $compileOptions=array(); // опции компилятора
 
-private $currentOptions; // параметры шаблона для передачи в обработчики
+private $baseOptions=array(); // базовые оцпии шаблонов
+private $options; // опции конкретного шаблона, хранятся до ленивого объединения с базовыми опциями
+private $currentOptions=null; // параметры шаблона для передачи в обработчики
 
 // Блочные пользовательские функции
 // Вызываются один раз. Из шаблона могут вызвать метод innerContent - лениво вычисляющееся содержимое.
@@ -80,30 +81,46 @@ private static function init(){
 }
 
 /**
- * Определение времеми модификации или создания исходного кода шаблона
+ * Определение времеми модификации или создания исходного кода шаблона.
+ * Для изменения способа получения времени, метод наследуется.
  * @param string $name имя шаблона
  * @return int время модификации в UNIX-формате
+ * @throws TemplateException исключение в том случае, если шаблон не найден
  */
 protected function getSourceTime($name){
-    return filemtime('templates/'.$name.'.html');
+    $fileName='templates/'.$name.'.html';
+    if(!file_exists($fileName)){
+        throw new TemplateException('Шаблон '.$fileName.' не найден');
+    }
+    return filemtime($fileName);
 }
 /**
- * Получение исходного кода шаблона
+ * Получение исходного кода шаблона.
+ * Для изменения способа получения исходного кода, метод наследуется.
  * @param string $name имя шаблона
  * @return string исходный код
  */
 protected function getSource($name){
-    
+    // если затребовали исходный код, значит будет и сохранение скомпилированного шаблона.
+    // предварительно создаём директорию под скомпилированный шаблон
+    $compiledDir='cache/templates';
+    if(!file_exists($compiledDir)){
+        mkdir($compiledDir, 0755, true);
+    }
+    // шаблон уже прошёл проверку на существовании в методе получения времени модификации
+    return file_get_contents('templates/'.$name.'.html');
 }
 /**
  * Получение имени скомпилированного файла шаблона. Файл не обязательно должен существовать.
  * Поддерживается только локальное хранение скомпилированных шаблонов.
- * Опции можно получить через $this->getOptions()
+ * Опции можно получить через $this->getOptions().
+ * Для изменения способа получения имени файла, метод наследуется.
  * @param string $name имя шаблона
  * @return string имя скомпилированного файла
  */
 protected function getCompiledFileName($name){
-    
+    // имя скомпилированного файла. Добавляем суффикс .tmp, чтоб файл считался временным и мог удаляться сборщиком
+    return 'cache/templates/'.strtr($name, '/', '.').'.tmp.php';
 }
 /**
  * базовые опции шаблонов, которые могут переопределяться для каждого шаблона в отдельности
@@ -111,7 +128,7 @@ protected function getCompiledFileName($name){
  * @return Template this
  */
 public function setBaseTemplateOptions(array $options){
-    $this->options=$options;
+    $this->baseOptions=$options;
     return $this;
 }
 
@@ -132,20 +149,26 @@ public function __construct(){
  * @return array
  */
 protected function getOptions(){
+    if($this->currentOptions===null){ // используем текущие опции как флаг их неинициализированности
+        $this->currentOptions=$this->options;
+        // индивидуальные опции не перезаписываются базовыми
+        $this->currentOptions+=$this->baseOptions;
+    }
     return $this->currentOptions;
 }
 /**
  * Визуализация шаблона.
  * @param string $name уникальное имя шаблона, однозначно определяющее его исходный код.
  * @param array $vars карта переменных, передаваемых в шаблон
- * @param array $options дополнительные опции шаблона
+ * @param array $options дополнительные опции шаблона. Могут переопределить базовые опции.
  * @return string результат
  */
 public function render($name, array $vars=null, array $options=null){
     $compFileName=&$this->cacheCompiledFiles[$name];
     if($compFileName===null){
-        // добавляем базовые опции, не перезаписывающие индивидуальные
-        $this->currentOptions=$options?$options+$this->options:$this->options;
+        $this->currentOptions=null; // флаг: результирующие опции не инициализированы
+        // запоминаем опции для ленивой передачи в управляющие методы
+        $this->options=$options?$options:array();
         $compFileName=$this->getCompiledFileName($name); // получаем имя скомпилированного файла
         // если скомпилированный файл устарел или не существует, перекомпилируем его
         if(!file_exists($compFileName) || filemtime($compFileName)<$this->getSourceTime($name)){
