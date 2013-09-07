@@ -7,52 +7,11 @@
 
 namespace awa\template;
 
-use Closure;
+//use Closure;
 
 /**
  * Шаблонизатор AWA Template v2.0
- * 
- * Расширение шаблонов - .html
- * 
- * Синтаксис
- * 
- * Операторы. Могут вызываться самостоятельно. Не возвращают значений и не могут вызываться внутри выражений.
- * <table>
- * <tr><td>{rem}{endrem}</td><td>комментарий</td></tr>
- * <tr><td>{if expression} {elif expression} {else} {endif}</td><td>условный оператор. Ветки elif и else необязательны</td></tr>
- * <tr><td>{for expression key value} {else} {endfor}<br/>{for expression value} {else} {endfor}</td>
- *      <td>Перебор массива. Ключ и значение - идентификаторы. Ключ можно не указывать</td></tr>
- * <tr><td>{echo expression}</td><td>Вставка значения выражения в шаблон</td></tr>
- * <tr><td>{lang expr}</td><td>Вставка языковой конструкции в шаблон. expr это массив вида [module,pack,name] или string. Модуль по умолчанию - текущий, пакет - устанавливается перед рендерингом или main. Если указывать константный массив или строк, используется оптимизация.</td></tr>
- * <tr><td>{format expr expr1 expr2 ... exprN}</td><td>Аналогично lang, но форматирует вывод с помощю sprintf-подобной функции</td></tr>
- * <tr><td>{include name_expr map_expr}</td><td>Вставка шаблона с указанными параметрами-картой. Не проверяется на рекурсию. Имя указывается аналогично имени lang-конструкции, но без имени пакета. Настройки шаблона наследуются.</td></tr>
- * <tr><td>{set lvalue_expr expr}</td>Присваивание.<td></td></tr>
- * <tr><td>{inc lvalue_expr}</td><td>Увеличение на единицу</td></tr>
- * <tr><td>{dec lvalue_expr}</td><td>Уменьшение на единицу</td></tr>
- * </table>
- * <table>
- * 
- * Выражения. Не могут использоваться вне операторов
- * Идентификатор                                := a-zA-Z_0-9<br/>
- * Переменная                                   := идентификатор<br/>
- * Строка                                       := "любые символы"<br/>
- * Карта                                        := {выражение-ключ:выражение-значение, ...}<br/>
- * Массив                                       := [выражение, выражение, ...]<br/>
- * Обращение к элементу массива или карты       := выражение[выражение-ключ]<br/>
- * Обращение к свойству объекта                 := выражение.идентификатор<br/>
- * 
- * Операции, возвращающие значения. Не могут использоваться вне операторов
- * @-at - предварительная проверка на существование переменной
- * 
- * Приоритеты операций
- * (), [], .        - унарные,  лево-ассоциативные
- * -, +, @, !       - унарные,  право-ассоциативные
- * /, *, %          - бинарные, лево-ассоциативные
- * +, -             - бинарные
- * <, <=, >, >=     - бинарные
- * ==, !=           - бинарные
- * &&               - бинарные
- * ||               - бинарные
+ * @link http://awaproject.org/wiki/AWA_Template официальная документация
  */
 class Template{
     
@@ -73,13 +32,6 @@ private $currentOptions=null; // параметры шаблона для пер
 // Получают список исходных кодов параметров, возвращают PHP код
 
 
-// <editor-fold defaultstate="collapsed" desc="========================= Кофигурация ======================">
-
-// базовая инициализация, вызывается лениво один раз
-private static function init(){
-    define('AWA_TEMPLATE_GUARD', true); // защита от прямого доступа к шаблонам
-}
-
 /**
  * Определение времеми модификации или создания исходного кода шаблона.
  * Для изменения способа получения времени, метод наследуется.
@@ -88,9 +40,13 @@ private static function init(){
  * @throws TemplateException исключение в том случае, если шаблон не найден
  */
 protected function getSourceTime($name){
-    $fileName='templates/'.$name.'.html';
+    $sourceDir=&$this->cacheStdSourceDir;
+    if($sourceDir===null){
+        $sourceDir=defined('AWATPL_SOURCE_DIR')?AWATPL_SOURCE_DIR:'templates';
+    }
+    $fileName=$sourceDir.'/'.$name;
     if(!file_exists($fileName)){
-        throw new TemplateException('Шаблон '.$fileName.' не найден');
+        throw new TemplateException('Шаблон "'.$fileName.'" не найден');
     }
     return filemtime($fileName);
 }
@@ -103,12 +59,12 @@ protected function getSourceTime($name){
 protected function getSource($name){
     // если затребовали исходный код, значит будет и сохранение скомпилированного шаблона.
     // предварительно создаём директорию под скомпилированный шаблон
-    $compiledDir='cache/templates';
+    $compiledDir=$this->cacheStdCompiledDir;
     if(!file_exists($compiledDir)){
         mkdir($compiledDir, 0755, true);
     }
     // шаблон уже прошёл проверку на существовании в методе получения времени модификации
-    return file_get_contents('templates/'.$name.'.html');
+    return file_get_contents($this->cacheStdSourceDir.'/'.$name);
 }
 /**
  * Получение имени скомпилированного файла шаблона. Файл не обязательно должен существовать.
@@ -119,8 +75,12 @@ protected function getSource($name){
  * @return string имя скомпилированного файла
  */
 protected function getCompiledFileName($name){
+    $compiledDir=&$this->cacheStdCompiledDir;
+    if($compiledDir===null){
+        $compiledDir=defined('AWATPL_COMPILED_DIR')?AWATPL_COMPILED_DIR:'cache/templates';
+    }
     // имя скомпилированного файла. Добавляем суффикс .tmp, чтоб файл считался временным и мог удаляться сборщиком
-    return 'cache/templates/'.strtr($name, '/', '.').'.tmp.php';
+    return $compiledDir.'/'.strtr($name, '/', '.').'.tmp.php';
 }
 /**
  * базовые опции шаблонов, которые могут переопределяться для каждого шаблона в отдельности
@@ -131,9 +91,6 @@ public function setBaseTemplateOptions(array $options){
     $this->baseOptions=$options;
     return $this;
 }
-
-// </editor-fold>
-
 /**
  * 
  */
@@ -170,8 +127,10 @@ public function render($name, array $vars=null, array $options=null){
         // запоминаем опции для ленивой передачи в управляющие методы
         $this->options=$options?$options:array();
         $compFileName=$this->getCompiledFileName($name); // получаем имя скомпилированного файла
+        // время получаем вне прерывания, так как внутри него есть проверка существования исходникак
+        $sourceTime=$this->getSourceTime($name);
         // если скомпилированный файл устарел или не существует, перекомпилируем его
-        if(!file_exists($compFileName) || filemtime($compFileName)<$this->getSourceTime($name)){
+        if(!file_exists($compFileName) || filemtime($compFileName)<$sourceTime){
             $code=Compiler::compile($this->getSource($name), $this->compileOptions);
             file_put_contents($compFileName, $code);
         }
@@ -188,7 +147,10 @@ private function exec($___fileName, array $___vars){
     extract($___vars); // превращаем элементы массива в локальные переменные
     return include $___fileName;
 }    
-
+// базовая инициализация, вызывается лениво один раз
+private static function init(){
+    define('AWA_TEMPLATE_GUARD', true); // защита от прямого доступа к шаблонам
+}
 
 }
 

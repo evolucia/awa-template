@@ -25,12 +25,13 @@ private static $regexpString='("(\\\\\\\\)*")|(((".*?[^\\\\])|")(\\\\\\\\)*")';
 private static $regexpNumber='(([0-9]+[eE](\+|-)?[0-9]+)|(0x[0-9A-Fa-f]+)|([0-9]+\.?[0-9]*)|([0-9]*\.?[0-9]+))';
 // идентификатор
 private static $regexpIdentificator='[a-zA-Z_][a-zA-Z0-9_]*';
-// идентификатор всех ключевых слов, после которых идут выражения
+// идентификатор всех ключевых слов
 private static $regexpKeywords=null;
-// идентификатор всех ключевых слов, не содержащих выражений
-private static $regexpKeywordsEmpty=null;
 // ID последней временной переменной
 private static $tmpVarId=0;
+
+private static $regexpOperatorOpen;
+private static $regexpOperatorClose;
 
 
 // <editor-fold defaultstate="collapsed" desc="=============================== Ключевые слова ==============================">
@@ -38,6 +39,8 @@ private static $tmpVarId=0;
 // ключевые слова
 const KEY_REM       ='rem'; // комментарий
 const KEY_ENDREM    ='endrem'; // закрытие комментария
+const KEY_RAW       ='raw'; // необрабатываемая часть шаблона
+const KEY_ENDRAW    ='endraw'; // конец необрабатываемой части шаблона
 const KEY_ECHO      ='echo'; // вывод
 const KEY_IF        ='if'; // условие
 const KEY_ELIF      ='elif'; // альтернативное условие
@@ -52,11 +55,12 @@ const KEY_INC       ='inc';
 const KEY_DEC       ='dec';
 
 // список всех ключевых слов
-private static $keywords=array(self::KEY_REM, self::KEY_ENDREM, self::KEY_IF, self::KEY_ELIF, self::KEY_ELSE, self::KEY_ENDIF,
+private static $keywords=array(self::KEY_REM, self::KEY_ENDREM, self::KEY_RAW, self::KEY_ENDRAW,
+    self::KEY_IF, self::KEY_ELIF, self::KEY_ELSE, self::KEY_ENDIF,
     self::KEY_FOR, self::KEY_ENDFOR, self::KEY_ECHO, self::KEY_FORMAT, self::KEY_INCLUDE,
     self::KEY_SET, self::KEY_INC, self::KEY_DEC);
 // ключевые слова, начинающие операторы
-private static $keywordsBegin=array(self::KEY_REM,self::KEY_IF,self::KEY_FOR,self::KEY_ECHO,self::KEY_FORMAT,self::KEY_INCLUDE,self::KEY_SET,self::KEY_INC,self::KEY_DEC);
+private static $keywordsBegin=array(self::KEY_REM,self::KEY_RAW,self::KEY_IF,self::KEY_FOR,self::KEY_ECHO,self::KEY_FORMAT,self::KEY_INCLUDE,self::KEY_SET,self::KEY_INC,self::KEY_DEC);
 
 // </editor-fold>
 
@@ -119,15 +123,17 @@ const CHECK_ONLY=0x0400; // только проверить, принимает�
 //const REQUIRED=0x0400;
 // специальные флаги грамматик
 const KWD_EXCL_CONTENT=0x0001; // предварительно извлечь контент
-const KWD_EMPTY=0x0002; // ключевое слово без содержимого
-
 
 // <editor-fold defaultstate="collapsed" desc="====================================== Запуск ===============================">
 
 /**
  * Компиляция шаблона
  * @param string $source исходный код
- * @param array $options параметры компиляции
+ * @param array $options параметры компиляции: <table>
+ * <tr><td>operator_open</td><td>Лексема открытия оператора</td><td>{</td></tr>
+ * <tr><td>operator_close</td><td>Лексема закрытия оператора</td><td>}</td></tr>
+ * <tr><td></td><td></td></tr>
+ * </table>
  * @return string скомпилированный код
  */
 public static function compile($source, array $options){
@@ -135,7 +141,10 @@ public static function compile($source, array $options){
         self::$isInit=true;
         self::init();
     }
-    
+    // конфигурация
+    self::$regexpOperatorOpen=isset($options['operator_open'])?preg_quote($options['operator_open'], '/'):'\\{';
+    self::$regexpOperatorClose=isset($options['operator_close'])?preg_quote($options['operator_close'], '/'):"\\}\r?\n?";
+    // --------------
     self::$source=$source;
     self::$sourceLen=mb_strlen($source);
     $ret="<?php if(!defined('AWA_TEMPLATE_GUARD')){exit('Template guard restriction');}\n"; // защитная преамбула от прямого доступа
@@ -154,9 +163,7 @@ public static function compile($source, array $options){
 }
 // предварительная инициализация компилятора
 private static function init(){
-    $allKeywords='('.implode('|', self::$keywords).')';
-    self::$regexpKeywords=preg_quote('{').$allKeywords.'(?!\w)';
-    self::$regexpKeywordsEmpty=preg_quote('{').$allKeywords.preg_quote('}');
+    self::$regexpKeywords='(?:'.implode('|', self::$keywords).')(?!\w)';
     $opArr=array(); // ключи - сами операторы, значения - их длина, для сортировки
     foreach(self::$operations as &$propsLink){
         $propsLink[1]=self::makeSet($propsLink[1]); // превращаем список в множество для быстрой проверки на существование
@@ -225,12 +232,11 @@ private static function grKeyword(&$retPos, array &$retCode, $flags=0, &$retKeyw
     }else if($flags&self::SKIP_SPACES){
         self::grSkipSpaces($newPos, $newCode);
     }
-    $regexp=$flags&self::KWD_EMPTY?self::$regexpKeywordsEmpty:self::$regexpKeywords;
     $keyword='';
     // TODO в начале не должно стоять экранирующего слэша, утверждение о предшествующем тексте: (?<!\\\\)
     // после ключевого слова должна идти либо закрывающая скобка либо любая небуква
-    if(self::finiteStateMachine($newPos, $regexp, $keyword)){
-        $keyword=trim($keyword,'{}');
+    if(self::finiteStateMachine($newPos, self::$regexpOperatorOpen.self::$regexpKeywords, $keyword)){
+        $keyword=preg_replace('/^'.self::$regexpOperatorOpen.'/','', $keyword);
         if($allowKeywords===null || in_array($keyword, $allowKeywords)){
             $ret=true;
             if($retKeyword!==null){
@@ -276,8 +282,34 @@ private static function grContent(&$retPos, array &$retCode, $flags=0){
     }
     return $ret;
 }
+
 /**
- * закрытие ключевого слова
+ * Закрытие оператора. ВАЖНО! Пробелы всегда пропускаются
+ * @param int $retPos
+ * @param type $retCode
+ * @param int $flags доступные флаги:
+ * CHECK_ONLY
+ * REQUIRED
+ * @return boolean
+ */
+private static function grKeywordClose(&$retPos, array &$retCode, $flags=0){
+    $newPos=$retPos; // не затираем переданную позицию
+    $newCode=$retCode;
+    self::grSkipSpaces($newPos, $newCode);
+    
+    $ret=self::finiteStateMachine($newPos, self::$regexpOperatorClose);
+    if($ret){
+        if(!($flags&self::CHECK_ONLY)){
+            $retPos=$newPos;
+            $retCode=$newCode;
+        }
+    }else if($flags&self::REQUIRED){
+        self::error('Ожидалось закрытие оператора', $newPos);
+    }
+    return $ret;
+}
+/**
+ * Закрытие скобки выражения
  * @param int $retPos
  * @param type $retCode
  * @param int $flags доступные флаги:
@@ -303,7 +335,7 @@ private static function grClose(&$retPos, array &$retCode, $flags=0, $closeLex=f
             $retCode=$newCode;
         }
     }else if($flags&self::REQUIRED){
-        self::error('Ожидалось терминальная лексема "'.$closeLex.'"', $newPos);
+        self::error('Ожидалось лексема "'.$closeLex.'"', $newPos);
     }
     return $ret;
 }
@@ -323,6 +355,7 @@ private static function grOperator(&$retPos, array &$retCode, $flags=0){
     if(self::grKeyword($newPos, $newCode, 0, $keyword, self::$keywordsBegin)){
         switch($keyword){
             case self::KEY_REM: $ret=self::grRemark($newPos, $newCode); break;
+            case self::KEY_RAW: $ret=self::grRaw($newPos, $newCode); break;
             case self::KEY_ECHO: $ret=self::grEcho($newPos, $newCode); break;
             case self::KEY_IF: $ret=self::grIf($newPos, $newCode); break;
             case self::KEY_FOR: $ret=self::grFor($newPos, $newCode); break;
@@ -341,8 +374,32 @@ private static function grEcho(&$retPos, array &$retCode, $flags=0){
     $exprCode=array();
     // выражение и закрытие скобки
     $ret=self::grExpression($newPos, $exprCode, self::REQUIRED)
-            && self::grClose($newPos, $exprCode, self::REQUIRED|self::SKIP_SPACES)
+            && self::grKeywordClose($newPos, $exprCode, self::REQUIRED)
             && self::code($newCode, '('.self::assembleCode($exprCode).')', self::CODE_PRINT);
+    if($ret && !($flags&self::CHECK_ONLY)){
+        $retPos=$newPos;
+        $retCode=$newCode;
+    }
+    return $ret;
+}
+// необрабатываемый фрагмент
+private static function grRaw(&$retPos, array &$retCode, $flags=0){
+    $newPos=$retPos; // не затираем переданную позицию
+    $newCode=$retCode;
+    $ret=false;
+    // сразу закрываем скобку
+    if(self::grKeywordClose($newPos, $newCode, self::REQUIRED)){
+        $rawCode='';
+        $close=self::$regexpOperatorOpen.self::KEY_ENDRAW.self::$regexpOperatorClose;
+        // ищем близжайщую закрывающую комментарий скобку
+        if(self::finiteStateMachine($newPos, '.*?'.$close, $rawCode)){
+            // удаляем закрывающий оператор и экранируем код
+            $string=addcslashes(preg_replace('/'.$close.'$/', '', $rawCode), '\'');
+            $ret=self::code($newCode, '\''.$string.'\'', self::CODE_PRINT);
+        }else{
+            self::error('Ожидалось закрытие необрабатываемого фрагмента', $newPos);
+        }
+    }
     if($ret && !($flags&self::CHECK_ONLY)){
         $retPos=$newPos;
         $retCode=$newCode;
@@ -354,10 +411,10 @@ private static function grRemark(&$retPos, array &$retCode, $flags=0){
     $newPos=$retPos; // не затираем переданную позицию
     $newCode=$retCode;
     $ret=false;
-    // сразу закрываем скобку, не допускаем пробелы до неё
-    if(self::grClose($newPos, $newCode, self::REQUIRED)){
+    // сразу закрываем скобку
+    if(self::grKeywordClose($newPos, $newCode, self::REQUIRED)){
         // ищем близжайщую закрывающую комментарий скобку
-        if(self::finiteStateMachine($newPos, '.*?\\{'.self::KEY_ENDREM.'\\}')){
+        if(self::finiteStateMachine($newPos, '.*?'.self::$regexpOperatorOpen.self::KEY_ENDREM.self::$regexpOperatorClose)){
             $ret=true;
         }else{
             self::error('Ожидалось закрытие комментария', $newPos);
@@ -388,18 +445,20 @@ private static function grFor(&$retPos, array &$retCode, $flags=0){
         $valueId=$keyId;
         $keyId=null;
     }
-    self::grClose($newPos, $newCode, self::REQUIRED|self::SKIP_SPACES);
+    self::grKeywordClose($newPos, $newCode, self::REQUIRED);
     $cycleCode=array();
     $elseCode=array();
     $keyword=array();
     self::grOperatorSequence($newPos, $cycleCode); // необязательная последовательность операторов внутри
     // если есть альтернативный блок
-    if(($isElse=self::grKeyword($newPos, $cycleCode, self::KWD_EXCL_CONTENT|self::KWD_EMPTY, $keyword, array(self::KEY_ELSE)))){
+    if(($isElse=self::grKeyword($newPos, $cycleCode, self::KWD_EXCL_CONTENT, $keyword, array(self::KEY_ELSE)))){
+        self::grKeywordClose($newPos, $newCode, self::REQUIRED);
         self::grOperatorSequence($newPos, $elseCode);
     }
     // завершаем цикл
-    self::grKeyword($newPos, $newCode, self::REQUIRED|self::KWD_EXCL_CONTENT|self::KWD_EMPTY,
-                            $keyword, array(self::KEY_ENDFOR));
+    self::grKeyword($newPos, $newCode, self::REQUIRED|self::KWD_EXCL_CONTENT,
+                            $keyword, array(self::KEY_ENDFOR))
+            && self::grKeywordClose($newPos, $newCode, self::REQUIRED);
     if($isElse){
         $tmpVar='$'.self::tmpVar(); // для оптимизации один раз обращаемся к варажению массива, т. к. это может быть вызов метода
         self::code($newCode, $tmpVar.'='.$arrExpr, self::CODE_EXPR_OPERATOR);
@@ -427,7 +486,7 @@ private static function grIf(&$retPos, array &$retCode, $flags=0){
     $exprCode=array();
     // первое выражение и закрытие скобки
     $ret=self::grExpression($newPos, $exprCode, self::REQUIRED)
-            && self::grClose($newPos, $exprCode, self::REQUIRED|self::SKIP_SPACES)
+            && self::grKeywordClose($newPos, $exprCode, self::REQUIRED)
             && self::code($newCode, 'if('.self::assembleCode($exprCode).'){', self::CODE_BEGIN);
     do{
         self::grOperatorSequence($newPos, $newCode); // необязательная последовательность операторов
@@ -440,22 +499,23 @@ private static function grIf(&$retPos, array &$retCode, $flags=0){
                 // получаем выражение и продолжем анализ ключевых слов
                 $exprCode=array();
                 self::grExpression($newPos, $exprCode, self::REQUIRED)
-                && self::grClose($newPos, $exprCode, self::REQUIRED|self::SKIP_SPACES)
+                && self::grKeywordClose($newPos, $exprCode, self::REQUIRED)
                 && self::code($newCode, '}else if('.self::assembleCode($exprCode).'){', self::CODE_END_BEGIN);
                 $forward=true;
                 break;
             case self::KEY_ELSE: // альтернативная ветка по умолчанию
                 $notUsedKeyword='';
                 // получаем последний блок кода и закрываем блок if
-                self::grClose($newPos, $newCode, self::REQUIRED)
+                self::grKeywordClose($newPos, $newCode, self::REQUIRED)
                     && self::code($newCode, '}else{', self::CODE_END_BEGIN);
                 self::grOperatorSequence($newPos, $newCode); // необязательная последовательность операторов
-                    self::code($newCode, '}', self::CODE_END)
-                    && self::grKeyword($newPos, $newCode, self::REQUIRED|self::KWD_EXCL_CONTENT|self::KWD_EMPTY,
-                            $notUsedKeyword, array(self::KEY_ENDIF));
+                self::code($newCode, '}', self::CODE_END)
+                    && self::grKeyword($newPos, $newCode, self::REQUIRED|self::KWD_EXCL_CONTENT,
+                            $notUsedKeyword, array(self::KEY_ENDIF))
+                    && self::grKeywordClose($newPos, $newCode, self::REQUIRED);
                 break;
             case self::KEY_ENDIF: // конец блока. сразу закрываем скобку и завершаем цикл
-                self::grClose($newPos, $newCode, self::REQUIRED)
+                self::grKeywordClose($newPos, $newCode, self::REQUIRED)
                     && self::code($newCode, '}', self::CODE_END);
                 break;
         }
@@ -563,7 +623,8 @@ private static function grExpression(&$retPos, array &$retCode, $flags=0, $level
     $ret=false;
     self::grSkipSpaces($newPos, $newCode); // пропускаем пробелы, в выражении они не участвуют
     $char=self::$source[$newPos];
-    if($char===','||$char==='}'||$char===')'||$char===']'){ // конец выражения
+    // проверяем на конец выражения
+    if($char===','||$char==='}'||$char===')'||$char===']'||self::grKeywordClose($newPos, $newCode, self::CHECK_ONLY)){ 
     }else{
         if($level===false){
             $level=0; // уровень по умолчанию - нижний
