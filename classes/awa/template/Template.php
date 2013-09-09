@@ -1,13 +1,13 @@
 <?php
 /**
  * @package     awa.core
- * @copyright   Copyright (C) 2012 Ilia Dasevski <il.dashevsky@gmail.com>, Inc. All rights reserved.
+ * @author Ilia Dasevski <il.dashevsky@gmail.com>
  * @license     GNU General Public License version 3 or later; see LICENSE.txt
  */
 
 namespace awa\template;
 
-//use Closure;
+use Closure;
 
 /**
  * Шаблонизатор AWA Template v2.0
@@ -18,11 +18,12 @@ class Template{
 private static $isInit=false;
     
 private $cacheCompiledFiles=array(); // шаблона=>откомпилированный файл
-private $compileOptions=array(); // опции компилятора
 
 private $baseOptions=array(); // базовые оцпии шаблонов
 private $options; // опции конкретного шаблона, хранятся до ленивого объединения с базовыми опциями
 private $currentOptions=null; // параметры шаблона для передачи в обработчики
+
+private $userFunctions=array(); // пользовательские функции
 
 // Блочные пользовательские функции
 // Вызываются один раз. Из шаблона могут вызвать метод innerContent - лениво вычисляющееся содержимое.
@@ -83,6 +84,36 @@ protected function getCompiledFileName($name){
     return $compiledDir.'/'.strtr($name, '/', '.').'.tmp.php';
 }
 /**
+ * Регистрация пользовательской функции вывода. Функция будет во всех шаблонах текущего менеджера.
+ * @param string $name имя функции. Состоит из латинских букв, цифр и знака подчёркивания.
+ * Первый символ должен быть буквой или знаком подчёркивания
+ * @param Closure $func обработчик получает список параметров
+ * в той последовательности, в какой они указаны в шаблоне. Возвращаемое значение выводится в результат
+ * @return Template this
+ */
+public function registerFunction($name, Closure $func){
+    $this->userFunctions[$name]=$func;
+    return $this;
+}
+/**
+ * Регистрация пользовательской функции для компилятора. Имеет приоритет над пользовательскими функциями вывода.
+ * Функция будет во всех шаблонах текущего менеджера.
+ * API компилятора:<ul>
+ * <li>Compiler::tmpVar() - гарантированно уникальное имя временной переменной.</li>
+ * </ul>
+ * @param string $name имя функции. Состоит из латинских букв, цифр и знака подчёркивания.
+ * Первый символ должен быть буквой или знаком подчёркивания
+ * @param Closure $func (array &$retCode, array $args)
+ *      $retCode - возвращаемый код, в который при помощи метода Compiler::code добавляются фрагменты.
+ *      $args - список PHP кодов аргументов, переданных в шаблоне. Например, '"str"' или '45+4/4' или '$func(arg)'
+ * @see Compiler::code
+ * @return Template this
+ */
+public function registerCompilerFunction($name, Closure $func){
+    $this->userFunctions[$name]=$func;
+    return $this;
+}
+/**
  * базовые опции шаблонов, которые могут переопределяться для каждого шаблона в отдельности
  * @param array $options 
  * @return Template this
@@ -131,11 +162,13 @@ public function render($name, array $vars=null, array $options=null){
         $sourceTime=$this->getSourceTime($name);
         // если скомпилированный файл устарел или не существует, перекомпилируем его
         if(!file_exists($compFileName) || filemtime($compFileName)<$sourceTime){
-            $code=Compiler::compile($this->getSource($name), $this->compileOptions);
+            $code=Compiler::compile($this->getSource($name), array(
+                'user_func'=>array_keys($this->userFunctions) // пользовательские функции
+            ));
             file_put_contents($compFileName, $code);
         }
     }
-    return self::exec($compFileName, $vars?$vars:array());
+    return $this->exec($compFileName, $vars?$vars:array());
 }
 /**
  * Сборка шаблона. Используются длинный префикс для предотвращения совпадения имён.

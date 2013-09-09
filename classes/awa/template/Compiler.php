@@ -1,7 +1,7 @@
 <?php
 /**
  * @package     awa.core
- * @copyright   Copyright (C) 2012 Ilia Dasevski <il.dashevsky@gmail.com>, Inc. All rights reserved.
+ * @author Ilia Dasevski <il.dashevsky@gmail.com>
  * @license     GNU General Public License version 3 or later; see LICENSE.txt
  */
 
@@ -33,6 +33,7 @@ private static $tmpVarId=0;
 private static $regexpOperatorOpen;
 private static $regexpOperatorClose;
 
+private static $compileFuncMap; // карта пользовательских функций компилятора
 
 // <editor-fold defaultstate="collapsed" desc="=============================== Ключевые слова ==============================">
 
@@ -60,7 +61,11 @@ private static $keywords=array(self::KEY_REM, self::KEY_ENDREM, self::KEY_RAW, s
     self::KEY_FOR, self::KEY_ENDFOR, self::KEY_ECHO, self::KEY_FORMAT, self::KEY_INCLUDE,
     self::KEY_SET, self::KEY_INC, self::KEY_DEC);
 // ключевые слова, начинающие операторы
-private static $keywordsBegin=array(self::KEY_REM,self::KEY_RAW,self::KEY_IF,self::KEY_FOR,self::KEY_ECHO,self::KEY_FORMAT,self::KEY_INCLUDE,self::KEY_SET,self::KEY_INC,self::KEY_DEC);
+private static $defKeywordsBegin=array(self::KEY_REM,self::KEY_RAW,self::KEY_IF,
+    self::KEY_FOR,self::KEY_ECHO,self::KEY_FORMAT,self::KEY_INCLUDE,
+    self::KEY_SET,self::KEY_INC,self::KEY_DEC);
+
+private static $keywordsBegin;
 
 // </editor-fold>
 
@@ -72,6 +77,7 @@ const CODE_END=8; // конец блока
 const CODE_EXPR_OPERATOR=12; // оператор-выражение, оканчивающийся точкой с запятой
 const CODE_INNER=15; // вложенный блок кода
 const CODE_EXPR=31; // несамостоянельное выражение
+
 const PRINT_BEGIN=1001; // начало печати
 const PRINT_INNER=1002; // промежуточная печать
 const PRINT_END=1003; // завершение печати
@@ -127,13 +133,17 @@ const KWD_EXCL_CONTENT=0x0001; // предварительно извлечь к
 // <editor-fold defaultstate="collapsed" desc="====================================== Запуск ===============================">
 
 /**
- * Компиляция шаблона
- * @param string $source исходный код
- * @param array $options параметры компиляции: <table>
+ * Компиляция шаблона. Параметры компиляции:
+ * <table border="1">
+ * <tr><th>Ключ</th><th>Описание</th><th>По умолчанию</th></tr>
  * <tr><td>operator_open</td><td>Лексема открытия оператора</td><td>{</td></tr>
  * <tr><td>operator_close</td><td>Лексема закрытия оператора</td><td>}</td></tr>
- * <tr><td></td><td></td></tr>
+ * <tr><td>user_func</td><td>Список пользовательских функций вывода</td><td></td></tr>
+ * <tr><td>compile_func</td><td>Карта пользовательских функций компилятора.
+ * Ключи - сами функции. Приоритетнее пользовательских функций вывода</td><td></td></tr>
  * </table>
+ * @param string $source исходный код
+ * @param array $options параметры компиляции
  * @return string скомпилированный код
  */
 public static function compile($source, array $options){
@@ -142,12 +152,42 @@ public static function compile($source, array $options){
         self::init();
     }
     // конфигурация
-    self::$regexpOperatorOpen=isset($options['operator_open'])?preg_quote($options['operator_open'], '/'):'\\{';
-    self::$regexpOperatorClose=isset($options['operator_close'])?preg_quote($options['operator_close'], '/'):"\\}\r?\n?";
+    self::$regexpOperatorOpen=isset($options['operator_open'])
+            ?preg_quote($options['operator_open'], '/'):'\\{';
+    self::$regexpOperatorClose=isset($options['operator_close'])
+            ?preg_quote($options['operator_close'], '/'):"\\}\r?\n?";
+    
+    self::$compileFuncMap=array(); // сбрасываем функции компилятора
+    
+    // пользовательские функции
+    if(isset($options['user_func'])){
+        foreach($options['user_func'] as $func){
+            self::$compileFuncMap[$func]=function(array &$retCode, array $args)use($func){
+                // вызываем пользовательскую функцию и печатаем возвращаемое значение
+                Compiler::code($retCode, '$this->userFunctions[\''.$func.'\']('.implode(', ', $args).')', Compiler::CODE_PRINT);
+            };
+        }
+    }
+    // пользовательские блочные функции
+    if(isset($options['user_block_func'])){
+        
+    }
+    // пользовательские функции компилятора
+    if(isset($options['compile_func'])){
+        foreach($options['compile_func'] as $func=>$handler){
+            self::$compileFuncMap[$func]=$handler;
+        }
+    }
+    $funcList=array_keys(self::$compileFuncMap);
+    // ключевые слова, начинающие оператор или вызов функции
+    self::$keywordsBegin=array_merge(self::$defKeywordsBegin, $funcList);
+    // 
+    self::$regexpKeywords='(?:'.implode('|', array_merge(self::$keywords, $funcList)).')(?!\w)';
     // --------------
     self::$source=$source;
     self::$sourceLen=mb_strlen($source);
-    $ret="<?php if(!defined('AWA_TEMPLATE_GUARD')){exit('Template guard restriction');}\n"; // защитная преамбула от прямого доступа
+    // защитная преамбула от прямого доступа
+    $ret="<?php if(!defined('AWA_TEMPLATE_GUARD')){exit('Template guard restriction');}\n"; 
     $ret.=self::$accumVar."='';\n"; // сбрасываем накапливающую переменную
     $code=array(); // типизированные фрагменты кода
     $pos=0; // начальная позиция    
@@ -163,25 +203,25 @@ public static function compile($source, array $options){
 }
 // предварительная инициализация компилятора
 private static function init(){
-    self::$regexpKeywords='(?:'.implode('|', self::$keywords).')(?!\w)';
     $opArr=array(); // ключи - сами операторы, значения - их длина, для сортировки
     foreach(self::$operations as &$propsLink){
-        $propsLink[1]=self::makeSet($propsLink[1]); // превращаем список в множество для быстрой проверки на существование
+        // превращаем список в множество для быстрой проверки на существование
+        $propsLink[1]=self::makeSet($propsLink[1]);
         foreach($propsLink[1] as $operator){
             $opArr[$operator]=mb_strlen($operator);
         }
     }
     self::$operationLevelCount=count(self::$operations);
     arsort($opArr); // сортируем и сохраняем связки и выбираем правильно отсортированные ключи
-    $escapedOperations=array();
+    $escOper=array(); // список экранированных операторов
     foreach(array_keys($opArr) as $key){
-        $escapedOperations[]=preg_quote($key, '/'); // экранируем все спецсимволы
+        $escOper[]=preg_quote($key, '/'); // экранируем все спецсимволы
     }
     self::$cacheExprOperation=array(
-        implode('|',$escapedOperations),    // 0 - регулярное выражение для поиска оператора, начиная с самого длинного
-        null,                               // 1 - сохранённая позиция последней проверки
-        null,                               // 2 - последний найденный оператор
-        null                                // 3 - новая позиция, после найденного оператора
+        implode('|',$escOper), // 0 - регулярное выражение для поиска оператора, начиная с самого длинного
+        null,                  // 1 - сохранённая позиция последней проверки
+        null,                  // 2 - последний найденный оператор
+        null                   // 3 - новая позиция, после найденного оператора
     );
 }
 
@@ -359,6 +399,20 @@ private static function grOperator(&$retPos, array &$retCode, $flags=0){
             case self::KEY_ECHO: $ret=self::grEcho($newPos, $newCode); break;
             case self::KEY_IF: $ret=self::grIf($newPos, $newCode); break;
             case self::KEY_FOR: $ret=self::grFor($newPos, $newCode); break;
+            default: // иначе это функция компилятора
+                $args=array();
+                do{
+                    $exprCode=array();
+                    if(($forward=self::grExpression($newPos, $exprCode))){
+                        $args[]=self::assembleCode($exprCode);
+                    }
+                }while($forward);
+                $ret=self::grKeywordClose($newPos, $newCode, self::REQUIRED);
+                if(isset(self::$compileFuncMap[$keyword])){ // если это простая пользовательская функция
+                    $handler=self::$compileFuncMap[$keyword];
+                    $handler($newCode, $args);
+                }
+                break;
         }
     }    
     if($ret && !($flags&self::CHECK_ONLY)){
@@ -414,7 +468,8 @@ private static function grRemark(&$retPos, array &$retCode, $flags=0){
     // сразу закрываем скобку
     if(self::grKeywordClose($newPos, $newCode, self::REQUIRED)){
         // ищем близжайщую закрывающую комментарий скобку
-        if(self::finiteStateMachine($newPos, '.*?'.self::$regexpOperatorOpen.self::KEY_ENDREM.self::$regexpOperatorClose)){
+        if(self::finiteStateMachine($newPos,
+                    '.*?'.self::$regexpOperatorOpen.self::KEY_ENDREM.self::$regexpOperatorClose)){
             $ret=true;
         }else{
             self::error('Ожидалось закрытие комментария', $newPos);
@@ -451,7 +506,8 @@ private static function grFor(&$retPos, array &$retCode, $flags=0){
     $keyword=array();
     self::grOperatorSequence($newPos, $cycleCode); // необязательная последовательность операторов внутри
     // если есть альтернативный блок
-    if(($isElse=self::grKeyword($newPos, $cycleCode, self::KWD_EXCL_CONTENT, $keyword, array(self::KEY_ELSE)))){
+    if(($isElse=self::grKeyword($newPos, $cycleCode,
+                self::KWD_EXCL_CONTENT, $keyword, array(self::KEY_ELSE)))){
         self::grKeywordClose($newPos, $newCode, self::REQUIRED);
         self::grOperatorSequence($newPos, $elseCode);
     }
@@ -460,12 +516,14 @@ private static function grFor(&$retPos, array &$retCode, $flags=0){
                             $keyword, array(self::KEY_ENDFOR))
             && self::grKeywordClose($newPos, $newCode, self::REQUIRED);
     if($isElse){
-        $tmpVar='$'.self::tmpVar(); // для оптимизации один раз обращаемся к варажению массива, т. к. это может быть вызов метода
+        // для оптимизации один раз обращаемся к варажению массива, т. к. это может быть вызов метода
+        $tmpVar='$'.self::tmpVar();
         self::code($newCode, $tmpVar.'='.$arrExpr, self::CODE_EXPR_OPERATOR);
         $arrExpr=$tmpVar;
         self::code($newCode, 'if('.$arrExpr.'){', self::CODE_BEGIN);
     }
-    self::code($newCode, 'foreach('.$arrExpr.' as '.($keyId===null?'$'.$valueId.'':'$'.$keyId.'=>$'.$valueId.'').'){', self::CODE_BEGIN);
+    self::code($newCode, 'foreach('.$arrExpr.' as '
+            .($keyId===null?'$'.$valueId.'':'$'.$keyId.'=>$'.$valueId.'').'){', self::CODE_BEGIN);
     self::code($newCode, $cycleCode, self::CODE_INNER);
     self::code($newCode, '}', self::CODE_END);
     if($isElse){
@@ -637,8 +695,13 @@ private static function grExpression(&$retPos, array &$retCode, $flags=0, $level
             }else if(($ret=self::grConstant($newPos, $newCode, 0, $retExprType))){ // пытаемся получить константу
             }else{
                 $idCode=array();
+                $varBeginPos=$newPos;
                 if(self::grIdentifacator($newPos, $idCode)){ // если получили идентификатор, то это переменная
-                    $ret=self::code($newCode, '$'.self::assembleCode($idCode), self::CODE_EXPR);
+                    $varName=self::assembleCode($idCode);
+                    if($varName==='this'){
+                        self::error('Нельзя обращаться к переменной this', $varBeginPos);
+                    }
+                    $ret=self::code($newCode, '$'.$varName, self::CODE_EXPR);
                 }
             } 
         }else{
@@ -651,7 +714,8 @@ private static function grExpression(&$retPos, array &$retCode, $flags=0, $level
                     if(self::grExpression($newPos, $resExprCode, 0, $nextLevel, $retExprType)){
                         $resExpr=self::assembleCode($resExprCode);
                         do{ // если удалось распознать оператор нужного уровня
-                            if(($canHasNextSibling=self::checkExprOperation($newPos, $level, $op))){ // могут ли дальше быть операнды того же уровня
+                            // могут ли дальше быть операнды того же уровня
+                            if(($canHasNextSibling=self::checkExprOperation($newPos, $level, $op))){
                                 $rightExprCode=array(); // обязательно должна идти правая часть более выского уровня
                                 if(self::grExpression($newPos, $rightExprCode, self::REQUIRED, $nextLevel, $retExprType)){
                                     $resExpr='('.$resExpr.')'.$op.'('.self::assembleCode($rightExprCode).')';
@@ -665,8 +729,9 @@ private static function grExpression(&$retPos, array &$retCode, $flags=0, $level
                     // если обнанужили унарный оператор, то после него могут идти другие унарные операторы
                     if(self::checkExprOperation($newPos, $level, $op)){ // 
                         $resExprCode=array();
-                        $ret=self::grExpression($newPos, $resExprCode, self::REQUIRED, self::$unaryOperandLevel, $retExprType)
-                                && self::code($newCode, $op.self::assembleCode($resExprCode), self::CODE_EXPR);
+                        $ret=self::grExpression($newPos, $resExprCode,
+                                self::REQUIRED, self::$unaryOperandLevel, $retExprType)
+                            && self::code($newCode, $op.self::assembleCode($resExprCode), self::CODE_EXPR);
                     }else{ // иначе - унарный оператор не найден, переходим на следующий уровень
                         $ret=self::grExpression($newPos, $newCode, 0, $nextLevel, $retExprType);
                     }
@@ -683,7 +748,8 @@ private static function grExpression(&$retPos, array &$retCode, $flags=0, $level
                                         $keyExprCode=array();
                                         // внутри скобок обязательно должен быть ключ
                                         self::grExpression($newPos, $keyExprCode, self::REQUIRED)
-                                                && self::grClose($newPos, $keyExprCode, self::REQUIRED|self::SKIP_SPACES, self::CLOSE_BRACKET);
+                                                && self::grClose($newPos, $keyExprCode,
+                                                        self::REQUIRED|self::SKIP_SPACES, self::CLOSE_BRACKET);
                                         $resExpr.='['.self::assembleCode($keyExprCode).']';
                                         break;
                                     case '(': // вызов метода
@@ -692,14 +758,16 @@ private static function grExpression(&$retPos, array &$retCode, $flags=0, $level
                                         do{ // получаем выражение-параметр и смотрим, идёт ли за ним следующий параметр через запятую
                                             $paramCode=array();
                                             if(self::grExpression($newPos, $paramCode)){
-                                                $hasNextParam=self::grClose($newPos, $paramCode, self::SKIP_SPACES, self::CLOSE_COMMA);
+                                                $hasNextParam=self::grClose($newPos, $paramCode,
+                                                        self::SKIP_SPACES, self::CLOSE_COMMA);
                                                 $paramArr[]=self::assembleCode($paramCode);
                                             }else{
                                                 $hasNextParam=false;
                                             }
                                         }while($hasNextParam);
                                         // после вызова закрываем скобку
-                                        $ret=self::grClose($newPos, $unusedCode, self::REQUIRED|self::SKIP_SPACES, self::CLOSE_PARENTHESIS);
+                                        $ret=self::grClose($newPos, $unusedCode,
+                                                self::REQUIRED|self::SKIP_SPACES, self::CLOSE_PARENTHESIS);
                                         $resExpr.='('.implode(',', $paramArr).')';
                                         break;
                                     case '.': // обращение к свойству объекта возможно только через идентификатор
@@ -824,12 +892,34 @@ private static function checkExprOperation(&$retPos, $level, &$retOperator){
 }
 /**
  * Добавляет код
+ * Типы фрагментов кода:
+ * <table border="1">
+ * <tr><th>Константа</th><th>Описание</th><th>Пример</th></tr>
+ * <tr><td>Compiler::CODE_PRINT</td>
+ *      <td>Выражение, выводимое на печать. Точка с запятой в конце не указывается.</td>
+ *      <td>'Это строка' или 8+9+4+2</td></tr>
+ * <tr><td>Compiler::CODE_BEGIN</td>
+ *      <td>Открытие блока. В конце указывается открывающая скобка.</td>
+ *      <td>while(true){ или if(1==1){</td></tr>
+ * <tr><td>Compiler::CODE_END_BEGIN</td>
+ *      <td>Одновременное закрытие и открытие блока. Указывается закрывающая и открывающая скобки.</td>
+ *      <td>}else if(false){ или }else{</td></tr>
+ * <tr><td>Compiler::CODE_EXPR_OPERATOR</td>
+ *      <td>Самостоятельное выражение. В конце точка с запятой не указыватся.</td>
+ *      <td>$isNow=isNow() или funcCall()</td></tr>
+ * <tr><td>Compiler::CODE_END</td>
+ *      <td>Закрытие блока. Указывается закрывающая скобка.</td>
+ *      <td>}</td></tr>
+ * <tr><td>Compiler::CODE_INNER</td>
+ *      <td>Вложенный список фрагментов кода - массив, аналогичный $baseCode</td>
+ *      <td></td></tr>
+ * </table>
  * @param array $baseCode накопитель кода
  * @param mixed $newCode строка фрагмента или типизированный код
- * @param int $type тип кода
+ * @param int $type тип фрагмента кода
  * @return boolean true
  */
-private static function code(array &$baseCode, $newCode, $type){
+public static function code(array &$baseCode, $newCode, $type){
     $baseCode[]=array($newCode, $type);
     return true;
 }
@@ -858,7 +948,7 @@ private static function finiteStateMachine(&$retPos, $regexp, &$acceptedString=n
 /**
  * @return string идентификатор уникальной временной переменной
  */
-private static function tmpVar(){
+public static function tmpVar(){
     return '___tplUniqVar'.(++self::$tmpVarId);
 }
 // оставшаяся часть исходника. Кэширует повторяющиеся операции взятия подстроки

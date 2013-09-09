@@ -1,7 +1,7 @@
 <?php
 /**
  * @package     awa.core
- * @copyright   Copyright (C) 2012 Ilia Dasevski <il.dashevsky@gmail.com>, Inc. All rights reserved.
+ * @author Ilia Dasevski <il.dashevsky@gmail.com>
  * @license     GNU General Public License version 3 or later; see LICENSE.txt
  */
 
