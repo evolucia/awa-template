@@ -15,6 +15,8 @@ final class Compiler{
 private static $isInit=false;
 private static $cacheRemainSource; // кеш оставшегося фрагмента исходника
 private static $cacheExprOperation; // кеш для сопоставления текущей операции
+private static $cacheCurrentChar; // кеш текущего символа
+
 private static $source; // исходный код
 private static $sourceLen; // длина исходного кода
 private static $accumVar='$___accum'; // накапливающая визуализацию шаблона переменная
@@ -99,25 +101,34 @@ const OP_NOT_EXPR=4;
 
 // типы выражений
 const EXPR_STRING=1;
-const EXPR_MAP=2;
-const EXPR_ARRAY=3;
-const EXPR_VARIABLE=4;
-const EXPR_OPERATION=5;
+const EXPR_ARRAY=2;
+const EXPR_VARIABLE=3;
+const EXPR_NUMBER=4;
+const EXPR_MIXED=5;
 
 private static $operationLevelCount; // количество уровней операций
 // приоритеты операций
 private static $operations=array(
-    array(self::OP_BINARY, array('||')), // логические операторы
-    array(self::OP_BINARY, array('&&')),
-    array(self::OP_BINARY, array('==','!=')), // операторы сравнения
+    array(self::OP_BINARY, array('or')), // логические операторы
+    array(self::OP_BINARY, array('and')),
+    array(self::OP_BINARY, array('=','!=')), // операторы сравнения
     array(self::OP_BINARY, array('<','<=','>','>=')), // 
-    array(self::OP_BINARY, array('+','-')), // арифметические операторы
+    array(self::OP_BINARY, array('+','-','||')), // арифметические и строковые операторы
     array(self::OP_BINARY, array('*','/','%')), // 
     array(self::OP_UNARY, array('!','-','+','@')), // унарные 
     array(self::OP_SPECIAL, array('[','.','(')), // разыменование массива и обращение к объекту, вызов метода
-    array(self::OP_NOT_EXPR, array(':')), // не относятся к выражениям, но могут быть с ними перепутаны
+    array(self::OP_NOT_EXPR, array(':')), // не относятся к выражениям, но могут быть с ними перепутаны из-за того, что входят в их состав
 );
 private static $unaryOperandLevel=6; // уровень операторов, которые могут идти после унарных операторов
+
+private static $opTranslateMap=array(
+    'or'=>'||',
+    'and'=>'&&',
+    '='=>'==',
+    '||'=>'.'
+);
+
+
 
 // </editor-fold>
 
@@ -366,7 +377,7 @@ private static function grClose(&$retPos, array &$retCode, $flags=0, $closeLex=f
     if($closeLex===false){
         $closeLex=self::CLOSE_BRACE;
     }
-    if(($ret=self::$source[$newPos]===$closeLex)){
+    if(($ret=self::currentChar($newPos)===$closeLex)){
         $newPos++;
     }
     if($ret){
@@ -399,6 +410,7 @@ private static function grOperator(&$retPos, array &$retCode, $flags=0){
             case self::KEY_ECHO: $ret=self::grEcho($newPos, $newCode); break;
             case self::KEY_IF: $ret=self::grIf($newPos, $newCode); break;
             case self::KEY_FOR: $ret=self::grFor($newPos, $newCode); break;
+            case self::KEY_SET: $ret=self::grSet($newPos, $newCode); break;
             default: // иначе это функция компилятора
                 $args=array();
                 do{
@@ -421,7 +433,25 @@ private static function grOperator(&$retPos, array &$retCode, $flags=0){
     }
     return $ret;
 }
-// комментарий
+// присваивание
+private static function grSet(&$retPos, array &$retCode, $flags=0){
+    $newPos=$retPos; // не затираем переданную позицию
+    $newCode=$retCode;
+    $varCode=array();
+    $exprCode=array();
+    // переменная, выражение и закрытие скобки
+    $ret=self::grExpression($newPos, $varCode, self::REQUIRED)
+            && self::grExpression($newPos, $exprCode, self::REQUIRED)
+            && self::grKeywordClose($newPos, $exprCode, self::REQUIRED)
+            && self::code($newCode, self::assembleCode($varCode)
+                        .'=('.self::assembleCode($exprCode).')', self::CODE_EXPR_OPERATOR);
+    if($ret && !($flags&self::CHECK_ONLY)){
+        $retPos=$newPos;
+        $retCode=$newCode;
+    }
+    return $ret;
+}
+// печать
 private static function grEcho(&$retPos, array &$retCode, $flags=0){
     $newPos=$retPos; // не затираем переданную позицию
     $newCode=$retCode;
@@ -633,22 +663,40 @@ private static function grConstant(&$retPos, array &$retCode, $flags=0, &$retExp
     $newPos=$retPos; // не затираем переданную позицию
     $newCode=$retCode;
     $ret=false;
-    $char=self::$source[$newPos]; // для оптимизации анализируем первый символ
+    $char=self::currentChar($newPos); // для оптимизации анализируем первый символ
     if($char==='"'){ // строковый литерал
         $string='';
         if(self::finiteStateMachine($newPos, self::$regexpString, $string)){
             // заменяем двойные кавычки на одинарные,
             // убираем лишнее экранирование двойных ковычек и добавляем экранирование одинарных и бэкслеша
-            $string='\''.addcslashes(stripcslashes(substr($string,1,-1)), '\'\\').'\'';
-//            $string='\''.str_replace('\'', '\\\'', substr($string,1,-1)).'\'';
+            $string='\''.addcslashes(stripcslashes(mb_substr($string,1,-1)), '\'\\').'\'';
             $ret=self::code($newCode, $string, self::CODE_EXPR);
         }else{
             self::error('Ожидось окончание строкового литерала', $newPos);
         }
-    }else if($char==='{'){ // карта
-        exit('Карты в разработке');
     }else if($char==='['){ // массив
-        exit('Массивы в разработке');
+        $newPos++; // пропускаем скобку
+        $indexKey=0;
+        $arrElements=array();
+        do{
+            $keyCode=array();
+            $valueCode=array();
+            if(($forward=self::grExpression($newPos, $keyCode))){ // извлекаем ключ
+                self::grSkipSpaces($newPos, $keyCode);
+                if(self::finiteStateMachine($newPos, ':')){ // если дальше идёт разделитель
+                    self::grExpression($newPos, $valueCode, self::REQUIRED); // то обязательно идёт значение
+                }else{ // иначе ключ не указывается, а указывается только значение
+                    $valueCode=$keyCode;
+                    $keyCode=null;
+                }
+                // если ключ не указан, то используем индекс
+                $key= $keyCode===null ? $indexKey++ : self::assembleCode($keyCode);
+                $value=self::assembleCode($valueCode);
+                $arrElements[]=$key.'=>'.$value;
+            }
+        }while($forward && self::finiteStateMachine($newPos, ','));
+        $ret=self::grClose($newPos, $newCode,self::REQUIRED, self::CLOSE_BRACKET)
+                && self::code($newCode, 'array('.implode(', ', $arrElements).')', self::CODE_EXPR);
     }else{
         $result='';
         if(self::finiteStateMachine($newPos, self::$regexpNumber, $result)){ // число
@@ -680,9 +728,10 @@ private static function grExpression(&$retPos, array &$retCode, $flags=0, $level
     $newCode=$retCode;
     $ret=false;
     self::grSkipSpaces($newPos, $newCode); // пропускаем пробелы, в выражении они не участвуют
-    $char=self::$source[$newPos];
-    // проверяем на конец выражения
-    if($char===','||$char==='}'||$char===')'||$char===']'||self::grKeywordClose($newPos, $newCode, self::CHECK_ONLY)){ 
+    $char=self::currentChar($newPos);
+    // проверяем на конец выражения. ВАЖНО! Если : будет входить в выражения (тернарный оператор),
+    // то необходимо исключить его из проверки и проверять только по необходимости (там, где это действительно конец выражения).
+    if($char===','||$char===')'||$char===']'||$char===':'||self::grKeywordClose($newPos, $newCode, self::CHECK_ONLY)){ 
     }else{
         if($level===false){
             $level=0; // уровень по умолчанию - нижний
@@ -718,7 +767,9 @@ private static function grExpression(&$retPos, array &$retCode, $flags=0, $level
                             if(($canHasNextSibling=self::checkExprOperation($newPos, $level, $op))){
                                 $rightExprCode=array(); // обязательно должна идти правая часть более выского уровня
                                 if(self::grExpression($newPos, $rightExprCode, self::REQUIRED, $nextLevel, $retExprType)){
-                                    $resExpr='('.$resExpr.')'.$op.'('.self::assembleCode($rightExprCode).')';
+                                    $resExpr='('.$resExpr.')'
+                                            .(isset(self::$opTranslateMap[$op])?self::$opTranslateMap[$op]:$op)
+                                            .'('.self::assembleCode($rightExprCode).')';
                                 }
                             }
                         }while($canHasNextSibling);
@@ -958,6 +1009,17 @@ private static function remainSource($pos){
     }
     return self::$cacheRemainSource[1];
 }
+// Текущий символ. Кешируется для повторного вызыва с той же позицией
+private static function currentChar($pos){
+    if(!self::$cacheCurrentChar || self::$cacheCurrentChar[0]!==$pos){ // если кэш устарел
+        self::$cacheCurrentChar=array($pos, mb_substr(self::$source, $pos, 1));
+    }
+    return self::$cacheCurrentChar[1];
+}
+
+
+
+
 /**
  * Сообщение об ошибке
  * @param string $msg сообщение
@@ -994,5 +1056,5 @@ public static function makeSet(array $arr, $fromKeys=false){
 }
 
 // </editor-fold>
-    
+
 }

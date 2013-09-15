@@ -24,6 +24,7 @@ private $options; // опции конкретного шаблона, хран�
 private $currentOptions=null; // параметры шаблона для передачи в обработчики
 
 private $userFunctions=array(); // пользовательские функции
+private $userCompileFunctions=array(); // пользовательские функции компилятора
 
 // Блочные пользовательские функции
 // Вызываются один раз. Из шаблона могут вызвать метод innerContent - лениво вычисляющееся содержимое.
@@ -110,7 +111,7 @@ public function registerFunction($name, Closure $func){
  * @return Template this
  */
 public function registerCompilerFunction($name, Closure $func){
-    $this->userFunctions[$name]=$func;
+    $this->userCompileFunctions[$name]=$func;
     return $this;
 }
 /**
@@ -163,7 +164,8 @@ public function render($name, array $vars=null, array $options=null){
         // если скомпилированный файл устарел или не существует, перекомпилируем его
         if(!file_exists($compFileName) || filemtime($compFileName)<$sourceTime){
             $code=Compiler::compile($this->getSource($name), array(
-                'user_func'=>array_keys($this->userFunctions) // пользовательские функции
+                'user_func'=>array_keys($this->userFunctions), // пользовательские функции
+                'compile_func'=>$this->userCompileFunctions
             ));
             file_put_contents($compFileName, $code);
         }
